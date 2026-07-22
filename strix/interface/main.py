@@ -372,7 +372,12 @@ def _subscription_error_hint(exc: BaseException) -> str | None:
             "The ChatGPT backend requires streamed requests, but this call wasn't "
             "streamed. This is an internal Strix issue on this path — please report it."
         )
-    if "401" in joined or "unauthorized" in joined or "invalid_grant" in joined:
+    if (
+        "error code: 401" in joined
+        or "http 401" in joined
+        or "unauthorized" in joined
+        or "invalid_grant" in joined
+    ):
         return (
             "Your ChatGPT sign-in has expired or was revoked. Sign in again:\n"
             "  strix auth login chatgpt"

@@ -333,12 +333,16 @@ def build_openai_client() -> AsyncOpenAI:
 
     # Validate up front so sign-in problems surface at configure time, not
     # mid-scan, and to fail fast if the stored refresh token is dead.
-    _access, account_id = get_valid_token()
+    get_valid_token()
 
     async def _auth_hook(request: httpx.Request) -> None:
-        access, acct = await asyncio.to_thread(get_valid_token)
+        # Refresh-aware auth stamped per request so a scan that outlives one
+        # access token keeps working. The account id can only change with the
+        # token, so it is set here alongside the bearer rather than as a static
+        # default header.
+        access, account_id = await asyncio.to_thread(get_valid_token)
         request.headers["Authorization"] = f"Bearer {access}"
-        request.headers["chatgpt-account-id"] = acct
+        request.headers["chatgpt-account-id"] = account_id
 
     http_client = httpx.AsyncClient(
         timeout=httpx.Timeout(600.0, connect=30.0),
@@ -349,7 +353,6 @@ def build_openai_client() -> AsyncOpenAI:
         base_url=CODEX_BASE_URL,
         http_client=http_client,
         default_headers={
-            "chatgpt-account-id": account_id,
             "OpenAI-Beta": "responses=experimental",
             "originator": ORIGINATOR,
         },

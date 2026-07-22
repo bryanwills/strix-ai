@@ -188,7 +188,7 @@ def _run_oauth_flow(
             code, returned_state, error = result
             if error:
                 raise codex.CodexAuthError("oauth_error", error)
-            return _finish(code, returned_state, verifier, state)
+            return _finish(code, returned_state, verifier, state, require_state=True)
         console.print("[yellow]Timed out waiting for the browser. Falling back to manual paste.[/]")
 
     # Manual fallback: the user completes sign-in and pastes the redirect URL
@@ -200,14 +200,25 @@ def _run_oauth_flow(
     except EOFError as exc:
         raise codex.CodexAuthError("no_input", "no redirect URL provided") from exc
     code, returned_state = codex.parse_redirect_input(pasted)
-    return _finish(code, returned_state, verifier, state)
+    return _finish(code, returned_state, verifier, state, require_state=False)
 
 
 def _finish(
-    code: str | None, returned_state: str | None, verifier: str, expected_state: str
+    code: str | None,
+    returned_state: str | None,
+    verifier: str,
+    expected_state: str,
+    *,
+    require_state: bool,
 ) -> dict[str, Any]:
     if not code:
         raise codex.CodexAuthError("no_code", "no authorization code found in the redirect")
+    # The loopback callback from OpenAI always carries state, so a missing or
+    # mismatched value there is forged (CSRF) and must be rejected. Manual paste
+    # is user-initiated (the user copies their own redirect), so state is only
+    # validated when the pasted value includes it.
+    if require_state and returned_state is None:
+        raise codex.CodexAuthError("state_mismatch", "missing state in callback; possible CSRF")
     if returned_state is not None and returned_state != expected_state:
         raise codex.CodexAuthError("state_mismatch", "state did not match; possible CSRF")
     return codex.exchange_code(code, verifier)
