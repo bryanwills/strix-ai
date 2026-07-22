@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from agents import set_default_openai_api, set_default_openai_key, set_tracing_disabled
+from agents import (
+    set_default_openai_api,
+    set_default_openai_client,
+    set_default_openai_key,
+    set_tracing_disabled,
+)
 from agents.models.multi_provider import MultiProvider
+from agents.models.openai_responses import OpenAIResponsesModel
 from agents.retry import (
     ModelRetryBackoffSettings,
     ModelRetrySettings,
@@ -16,7 +22,7 @@ from agents.retry import (
 
 
 if TYPE_CHECKING:
-    from agents.models.interface import ModelProvider
+    from agents.models.interface import Model, ModelProvider
 
     from strix.config.settings import Settings
 
@@ -34,6 +40,33 @@ def _retry_statusless_provider_errors(context: RetryPolicyContext) -> bool:
     if normalized.is_abort:
         return False
     return normalized.status_code is None
+
+
+class _CodexResponsesModel(OpenAIResponsesModel):
+    """Responses model for the ChatGPT Codex backend, which rejects non-streamed
+    requests with ``{"detail": "Stream must be set to true"}``.
+
+    It always calls the API in streaming mode. The natively-streamed run path
+    (``Runner.run_streamed`` → ``stream_response``) is forwarded unchanged; the
+    non-streaming ``get_response`` path (warm-up, dedupe) transparently issues a
+    streamed request and aggregates the events back into a single ``Response``,
+    so those callers don't need to know the backend only speaks SSE.
+    """
+
+    async def _fetch_response(self, *args: Any, stream: bool = False, **kwargs: Any) -> Any:
+        # Always call the backend streamed (it rejects non-streamed requests).
+        events = await super()._fetch_response(*args, stream=True, **kwargs)  # type: ignore[call-overload]
+        if stream:
+            return events
+        # Non-streaming caller: aggregate the SSE events into a single Response.
+        final_response = None
+        async for event in events:  # iterate to exhaustion so the stream cleans up
+            if getattr(event, "type", None) == "response.completed":
+                final_response = event.response
+        if final_response is None:
+            msg = "ChatGPT backend stream ended without a completed response"
+            raise RuntimeError(msg)
+        return final_response
 
 
 class StrixProvider(MultiProvider):
@@ -58,6 +91,18 @@ class StrixProvider(MultiProvider):
         if prefix == "ollama" and stripped_model_name:
             return self._get_fallback_provider("litellm"), f"ollama_chat/{stripped_model_name}"
         return self._get_fallback_provider("litellm"), original_model_name
+
+    def get_model(self, model_name: str | None) -> Model:
+        model = super().get_model(model_name)
+        # In subscription mode the OpenAI route talks to the ChatGPT Codex
+        # backend, which requires streamed requests. Promote the responses model
+        # to the streaming-aware subclass (no added state, so the in-place class
+        # swap is safe) rather than duplicating the SDK's provider wiring.
+        from strix.config.loader import load_settings
+
+        if load_settings().llm.auth_mode == "subscription" and type(model) is OpenAIResponsesModel:
+            model.__class__ = _CodexResponsesModel
+        return model
 
 
 DEFAULT_MODEL_RETRY = ModelRetrySettings(
@@ -117,6 +162,9 @@ def configure_sdk_model_defaults(settings: Settings) -> None:
     """Apply Strix config to SDK-native defaults."""
     llm = settings.llm
     set_tracing_disabled(True)
+    if llm.auth_mode == "subscription":
+        _configure_subscription_defaults()
+        return
     _configure_litellm_compatibility()
     _configure_openrouter_attribution(llm.model)
     if llm.api_key:
@@ -129,6 +177,23 @@ def configure_sdk_model_defaults(settings: Settings) -> None:
         set_default_openai_api("chat_completions")
     else:
         set_default_openai_api("responses")
+
+
+def _configure_subscription_defaults() -> None:
+    """Route inference through a model subscription instead of an API key.
+
+    Builds the subscription-backed OpenAI client (currently ChatGPT/Codex) and
+    installs it as the SDK default, so ``StrixProvider`` uses it for the OpenAI
+    route. The client carries the OAuth bearer token and refreshes it per
+    request; the Codex backend speaks the Responses API. Statelessness
+    (``store=false`` and encrypted reasoning) is applied per call in
+    ``make_model_settings``.
+    """
+    from strix.auth import codex
+
+    client = codex.build_openai_client()
+    set_default_openai_client(client, use_for_tracing=False)
+    set_default_openai_api("responses")
 
 
 def _mirror_api_key_to_provider_env(model_name: str | None, api_key: str) -> None:
@@ -211,6 +276,10 @@ def _configure_litellm_default(name: str, value: str) -> None:
 
 def uses_chat_completions_tool_schema(model_name: str, settings: Settings) -> bool:
     """Return whether the resolved SDK route can only receive JSON function tools."""
+    # Subscription mode (ChatGPT/Codex) speaks the Responses API, so it takes the
+    # native reasoning-model tool schema regardless of the model name's shape.
+    if settings.llm.auth_mode == "subscription":
+        return False
     model = model_name.strip().lower()
     if "/" in model and not model.startswith("openai/"):
         return True

@@ -213,6 +213,7 @@ ignore = [
 # Test doubles use fixture tokens/passwords and match a callee signature whose
 # args they intentionally ignore.
 "tests/test_viewer_auth.py" = ["S105", "S106", "ARG001"]
+"tests/test_codex_auth.py" = ["S105", "S106", "SLF001"]
 "tests/test_report_pdf.py" = ["S105", "S106"]
 # Stdlib HTTP handler overrides (do_GET/do_POST) and lazy imports that avoid a
 # circular dependency with strix.telemetry / strix.viewer.report_pdf.
@@ -254,6 +255,9 @@ ignore = [
 "strix/report/state.py" = ["TC003", "PLR0912", "PLR0915", "E501", "PERF401"]
 "strix/report/usage.py" = ["PLC0415"]
 "strix/config/models.py" = ["PLC0415"]
+# Heavy inference deps (httpx, openai) imported lazily so auth-status checks
+# don't pull them in.
+"strix/auth/codex.py" = ["PLC0415"]
 # Interface utility branches per scope-mode / target-type combination;
 # splitting would obscure the decision tree without simplifying it.
 "strix/interface/utils.py" = ["PLR0912", "BLE001", "PLC0415"]

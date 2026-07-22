@@ -267,6 +267,23 @@ export STRIX_REASONING_EFFORT="high"  # control thinking effort (default: high, 
 > [!NOTE]
 > Strix automatically saves your configuration to `~/.strix/cli-config.json`, so you don't have to re-enter it on every run.
 
+#### Sign in with a ChatGPT subscription
+
+Instead of a metered API key, you can run Strix on your ChatGPT Plus/Pro subscription:
+
+```bash
+strix auth login chatgpt      # opens your browser to sign in with ChatGPT
+strix --target ./app-directory
+
+strix auth status             # show the active sign-in
+strix auth logout             # revert to API-key billing
+```
+
+This uses OpenAI's Codex OAuth flow: inference is billed to your ChatGPT plan rather than per token. Strix defaults to `gpt-5.4` here — newer models apply stricter content moderation that interferes with security-testing prompts, so `gpt-5.4` is recommended for scans. You can override the model with `strix auth login chatgpt --model <name>`. Note that the models a ChatGPT plan exposes are a narrower set than the OpenAI API. If the browser can't open, the command falls back to pasting the redirect URL by hand. Tokens are stored in `~/.strix/subscription-auth.json` (`0600`) and refreshed automatically.
+
+> [!NOTE]
+> Using a ChatGPT subscription outside OpenAI's own products is not officially supported by OpenAI and may be subject to its terms of use. For unattended/CI runs, prefer an API key.
+
 **Recommended models for best results:**
 
 - [OpenAI GPT-5.4](https://openai.com/api/) - `openai/gpt-5.4`
