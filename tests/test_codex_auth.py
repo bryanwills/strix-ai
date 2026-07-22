@@ -183,6 +183,49 @@ def test_get_valid_token_refreshes_and_persists_rotation(monkeypatch: pytest.Mon
     assert codex.read_record()["refresh"] == "r2"
 
 
+def test_get_valid_token_uses_token_rotated_by_another_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Simulate a parallel Strix process rotating the token while we wait for the
+    # refresh guard: the pre-guard read sees the stale token, the in-guard read
+    # sees the winner's fresh one, so we must NOT exchange the now-dead refresh.
+    records = [
+        {
+            "type": "oauth",
+            "provider": "codex",
+            "access": "stale",
+            "refresh": "r1",
+            "account_id": "acct",
+            "expires_at": time.time() - 10,
+        },
+        {
+            "type": "oauth",
+            "provider": "codex",
+            "access": "fresh-from-other-process",
+            "refresh": "r2",
+            "account_id": "acct",
+            "expires_at": time.time() + 3600,
+        },
+    ]
+    calls = {"n": 0}
+
+    def _fake_read() -> dict[str, Any]:
+        record = records[min(calls["n"], len(records) - 1)]
+        calls["n"] += 1
+        return record
+
+    def _boom(_payload: dict[str, str]) -> dict[str, Any]:
+        msg = "must not refresh a token another process already rotated"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(codex, "read_record", _fake_read)
+    monkeypatch.setattr(codex, "_post_form", _boom)
+
+    access, account_id = codex.get_valid_token()
+    assert access == "fresh-from-other-process"
+    assert account_id == "acct"
+
+
 def test_get_valid_token_raises_when_not_signed_in() -> None:
     with pytest.raises(codex.CodexAuthError) as exc:
         codex.get_valid_token()

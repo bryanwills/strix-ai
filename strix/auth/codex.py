@@ -32,6 +32,8 @@ from typing import TYPE_CHECKING, Any
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from openai import AsyncOpenAI
 
 
@@ -75,6 +77,36 @@ _TOKEN_TIMEOUT = 30
 _EXPIRY_SKEW_S = 300
 
 _refresh_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _refresh_guard() -> Iterator[None]:
+    """Serialize a token refresh within and across Strix processes.
+
+    The in-process lock covers concurrent agents in one process; a best-effort
+    file lock (``flock``) covers concurrent Strix processes sharing one login, so
+    two of them can't both spend the single-use refresh token and leave one with
+    ``invalid_grant``. Degrades to the in-process lock alone where ``flock`` is
+    unavailable (e.g. Windows).
+    """
+    with _refresh_lock:
+        try:
+            import fcntl
+
+            lock_path = store.AUTH_PATH.with_suffix(".lock")
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = lock_path.open("w")
+        except (ImportError, OSError):
+            yield
+            return
+        try:
+            with contextlib.suppress(OSError):
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
 
 
 class CodexAuthError(Exception):
@@ -295,16 +327,19 @@ def _near_expiry(record: dict[str, Any]) -> bool:
 def get_valid_token() -> tuple[str, str]:
     """Return ``(access_token, account_id)``, refreshing if near expiry.
 
-    Refreshes under a lock and re-reads the store after acquiring it, so that
-    when many agents fire at once only one refresh happens — OpenAI invalidates a
-    refresh token as soon as it is used, so a concurrent stampede would fail.
+    Refreshes under a within- and cross-process lock and re-reads the store after
+    acquiring it, so that when many agents (or parallel Strix processes sharing
+    one login) fire at once only one refresh happens — OpenAI invalidates a
+    refresh token as soon as it is used, so a concurrent stampede would fail. The
+    re-read means a caller that loses the race picks up the token the winner just
+    rotated instead of exchanging the now-dead one.
     """
     record = read_record()
     if record is None:
         raise CodexAuthError("not_authenticated", "not signed in; run: strix auth login")
     if not _near_expiry(record):
         return record["access"], record["account_id"]
-    with _refresh_lock:
+    with _refresh_guard():
         record = read_record()
         if record is None:
             raise CodexAuthError("not_authenticated", "not signed in; run: strix auth login")
